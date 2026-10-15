@@ -1,0 +1,304 @@
+{
+  "name": "36NEWS – Lấy tin báo chính thống & viết tiêu đề TikTok",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7,12,19 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cc12a589-6717-5191-a0bf-113f001e5dff",
+      "name": "Lịch chạy 7h-12h-19h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const FEEDS = [\n  {\n    \"source\": \"VnExpress\",\n    \"url\": \"https://vnexpress.net/rss/tin-moi-nhat.rss\"\n  },\n  {\n    \"source\": \"VnExpress\",\n    \"url\": \"https://vnexpress.net/rss/thoi-su.rss\"\n  },\n  {\n    \"source\": \"Tuổi Trẻ\",\n    \"url\": \"https://tuoitre.vn/rss/thoi-su.rss\"\n  },\n  {\n    \"source\": \"Thanh Niên\",\n    \"url\": \"https://thanhnien.vn/rss/thoi-su.rss\"\n  },\n  {\n    \"source\": \"Dân Trí\",\n    \"url\": \"https://dantri.com.vn/rss/xa-hoi.rss\"\n  },\n  {\n    \"source\": \"VTV\",\n    \"url\": \"https://vtv.vn/trong-nuoc.rss\"\n  }\n];\n\nreturn FEEDS.map(f => ({ json: f }));"
+      },
+      "id": "8c51fe4c-6b1c-5195-a384-1ce0c4631d57",
+      "name": "Danh sách báo chính thống",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "68952a09-764e-57e8-8a0a-ae8d152b0a14",
+      "name": "Đọc RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Giữ tin trong N giờ gần nhất, mỗi lần chạy tối đa MAX_ITEMS tin\nconst HOURS = 6;\nconst MAX_ITEMS = 8;\nconst SOURCES = {\n  'vnexpress.net': 'VnExpress',\n  'tuoitre.vn': 'Tuổi Trẻ',\n  'thanhnien.vn': 'Thanh Niên',\n  'dantri.com.vn': 'Dân Trí',\n  'vtv.vn': 'VTV',\n};\nconst cutoff = Date.now() - HOURS * 3600 * 1000;\nconst strip = s => String(s || '').replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();\n\nconst seen = new Set();\nconst items = [];\nfor (const { json } of $input.all()) {\n  const link = json.link;\n  if (!link || seen.has(link)) continue;\n  const time = Date.parse(json.isoDate || json.pubDate || '');\n  if (!time || time < cutoff) continue;\n  seen.add(link);\n  const host = new URL(link).hostname.replace(/^www\\./, '');\n  items.push({\n    title: strip(json.title),\n    summary: strip(json.contentSnippet || json.content || json.description).slice(0, 1500),\n    link,\n    source: SOURCES[host] || host,\n    publishedAt: new Date(time).toISOString(),\n  });\n}\nitems.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));\nreturn items.slice(0, MAX_ITEMS).map(json => ({ json }));"
+      },
+      "id": "2f144ffb-bf5e-56ec-9ec1-bd92404cddef",
+      "name": "Lọc tin mới",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsRepeatedInPreviousExecutions",
+        "dedupeValue": "={{ $json.link }}",
+        "options": {}
+      },
+      "id": "05820b3f-1f07-52c9-bff9-c084b0e0e0bf",
+      "name": "Bỏ tin đã xử lý",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'claude-opus-5-5',\n  max_tokens: 16000,\n  output_config: {\n    effort: 'low',\n    format: {\n      type: 'json_schema',\n      schema: {\n        type: 'object',\n        properties: {\n          headline: { type: 'string' },\n          caption: { type: 'string' },\n          hashtags: { type: 'array', items: { type: 'string' } },\n          category: { type: 'string', enum: ['Tin nóng', 'Thời tiết', 'Cảm động', 'Đời sống', 'Ẩm thực', 'Giao thông', 'Khác'] },\n          sensitive: { type: 'boolean' }\n        },\n        required: ['headline', 'caption', 'hashtags', 'category', 'sensitive'],\n        additionalProperties: false\n      }\n    }\n  },\n  system: \"Bạn là biên tập viên mạng xã hội của kênh TikTok tin tức \\\"36NEWS – Kuong36 Entertainment\\\". Từ một bài báo chính thống, hãy viết nội dung đăng TikTok.\\nQuy tắc bắt buộc:\\n- Chỉ dùng thông tin có trong tiêu đề và tóm tắt được cung cấp. Không bịa số liệu, tên người, địa điểm hay chi tiết không có trong bài.\\n- headline: tiếng Việt có dấu, IN HOA toàn bộ, 8–20 từ, gây tò mò nhưng không sai sự thật, không giật tít xúc phạm, có thể dùng dấu \\\"…\\\" để tạo tò mò.\\n- caption: 1–3 câu tự nhiên, thân thiện, có 1–2 emoji, kết thúc bằng một câu hỏi mời bình luận.\\n- hashtags: 5–7 hashtag không dấu, viết liền, bắt đầu bằng #, luôn có #36news và #tintuc.\\n- category: một trong: Tin nóng, Thời tiết, Cảm động, Đời sống, Ẩm thực, Giao thông, Khác.\\n- sensitive: true nếu tin liên quan tai nạn chết người, tội phạm, trẻ em bị hại, chính trị nhạy cảm hoặc tin chưa được xác nhận — để người duyệt xem kỹ trước khi đăng.\",\n  messages: [{\n    role: 'user',\n    content: 'Nguồn: ' + $json.source + '\\nTiêu đề: ' + $json.title + '\\nTóm tắt: ' + $json.summary\n  }]\n}) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "5d8a9b18-8716-5526-955f-bc6c2690c9c8",
+      "name": "Claude viết tiêu đề",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Lấy JSON từ khối text trong phản hồi của Claude và ghép với bài báo gốc\nconst article = $('Bỏ tin đã xử lý').item.json;\nconst res = $json;\nconst textBlock = (res.content || []).find(b => b.type === 'text');\n\nif (res.stop_reason === 'refusal' || !textBlock) {\n  return { json: { ...article, headline: '', caption: '', hashtags: '', category: 'Khác', sensitive: true,\n    status: 'LỖI AI: ' + (res.stop_reason || res.error?.message || 'không có kết quả') } };\n}\n\nconst out = JSON.parse(textBlock.text);\nconst d = new Date();\nconst date = d.toLocaleDateString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', day: '2-digit', month: '2-digit', year: 'numeric' });\nreturn {\n  json: {\n    date: 'NGÀY ĐĂNG: ' + date,\n    headline: out.headline,\n    caption: out.caption + '\\n\\nNguồn: ' + article.source,\n    hashtags: out.hashtags.join(' '),\n    category: out.category,\n    sensitive: out.sensitive,\n    status: out.sensitive ? 'CẦN DUYỆT KỸ' : 'Chờ duyệt',\n    source: article.source,\n    title: article.title,\n    link: article.link,\n    publishedAt: article.publishedAt,\n  },\n};"
+      },
+      "id": "63359ca1-0431-59aa-8ec1-5cf54d3340e9",
+      "name": "Đọc kết quả AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "DAN_LINK_GOOGLE_SHEET_VAO_DAY"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tin"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "ab6c593e-9202-57e0-bbe5-9330bb0b9bca",
+      "name": "Lưu vào Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1540,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst rows = $input.all().map(({ json: n }) => `\n  <div style=\"border:1px solid #d5e5dc;border-radius:10px;padding:14px;margin:0 0 14px\">\n    <div style=\"font-size:12px;color:#5a6b62\">${esc(n.date)} · ${esc(n.category)} · ${esc(n.source)}\n      ${n.sensitive ? ' · <b style=\"color:#b42318\">⚠ CẦN DUYỆT KỸ</b>' : ''}</div>\n    <div style=\"font-size:18px;font-weight:800;color:#0f5132;margin:6px 0\">${esc(n.headline)}</div>\n    <div style=\"white-space:pre-line\">${esc(n.caption)}</div>\n    <div style=\"color:#1e7b4f;margin-top:6px\">${esc(n.hashtags)}</div>\n    <div style=\"font-size:12px;margin-top:8px\">Bài gốc: <a href=\"${esc(n.link)}\">${esc(n.title)}</a></div>\n  </div>`).join('');\nconst count = $input.all().length;\nreturn [{ json: {\n  subject: `36NEWS – ${count} tin mới chờ duyệt`,\n  html: `<div style=\"font-family:Arial,sans-serif;max-width:640px\">\n    <h2 style=\"color:#0f5132\">36NEWS – bản nháp tin mới</h2>\n    <p>Duyệt từng tin, kiểm tra bài gốc, rồi dán tiêu đề vào khung Canva.</p>${rows}</div>`,\n} }];"
+      },
+      "id": "46e24cfd-01d9-54d2-8bb6-97c2d9e69ecf",
+      "name": "Gom thành email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "EMAIL_CUA_BAN@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "8495fa81-feed-5e0b-b5b8-2e873f87edaa",
+      "name": "Gửi bản nháp qua Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Lịch chạy 7h-12h-19h": {
+      "main": [
+        [
+          {
+            "node": "Danh sách báo chính thống",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Danh sách báo chính thống": {
+      "main": [
+        [
+          {
+            "node": "Đọc RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc RSS": {
+      "main": [
+        [
+          {
+            "node": "Lọc tin mới",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lọc tin mới": {
+      "main": [
+        [
+          {
+            "node": "Bỏ tin đã xử lý",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bỏ tin đã xử lý": {
+      "main": [
+        [
+          {
+            "node": "Claude viết tiêu đề",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude viết tiêu đề": {
+      "main": [
+        [
+          {
+            "node": "Đọc kết quả AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Đọc kết quả AI": {
+      "main": [
+        [
+          {
+            "node": "Lưu vào Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gom thành email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gom thành email": {
+      "main": [
+        [
+          {
+            "node": "Gửi bản nháp qua Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Ho_Chi_Minh"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
